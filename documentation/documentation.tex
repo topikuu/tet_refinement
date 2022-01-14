@@ -1,0 +1,452 @@
+\documentclass{article}
+\usepackage[a4paper]{geometry}
+\usepackage{hyperref}
+\usepackage{float}
+\usepackage{enumitem}
+\usepackage{tikz}
+\usepackage{bold-extra} % Bold texttt
+\usetikzlibrary{arrows}
+\usepackage{subcaption}
+
+
+\title{Method for local refinement of tetrahedral meshes}
+
+\author{T. Kuutela\footnotemark[1]
+}
+
+\begin{document}
+	\maketitle
+
+	\renewcommand{\thefootnote}{\fnsymbol{footnote}}
+
+	\footnotetext[1]{Aalto University, Department of Mathematics and Systems Analysis, P.O. Box 11100, FI-00076 Aalto, Finland (topi.kuutela@aalto.fi). The work of TK was supported by the Academy of Finland (decision 312124).}
+
+	\section{Introduction}
+	Partial or "local" refinemenet of tetrahedral mesh is sometimes useful in e.g. finite element computations. However, local refinement of tetrahedrons without remeshing the whole domain turns out to be a surprisingly difficult problem. The difficulty is well explained on page 3 of \cite{embarrassinglyparallel}, which also describes one approach, especially well suited for cases where the resulting mesh is not intended to be saved. In following, we describe an algorithm that is similarly vectorizable and embarrassingly parallel - assuming the availability of a parallel integer sorting algorithm - and has predictable computation time. The predictable speed is achieved by having no (non-fixed-length) iterative parts in the algorithm, unlike classical edge bisection algorithms. The main difference to \cite{embarrassinglyparallel} is that we do not explicitly handle faces and instead directly split tetrahedra.
+
+	\pagebreak
+
+	\section{Algorithm}
+
+	\textbf{Inputs}: \\
+	\indent\textbf{p}: list of node positions, \\
+	\indent\textbf{t}: list of tetrahedra, \\
+	\indent\textbf{edge\_splits}: list of edges to be split
+	\vspace{0.5cm}
+
+	\noindent\textbf{Algorithm}:
+	\begin{enumerate}[label=\textbf{\arabic*:}, ref=\arabic*, itemsep=0em, parsep=0em]
+		\item Add new nodes at centers of edges to split. Keep track of "edge-to-new-point" map.
+		\item Classify tetrahedra into classes with topologically equivalent edge split patterns. (See below for details)
+		\label{it:classification}
+		\item Add center nodes to tetrahedra in 3-triple, 4-run and five split patterns (3a, 4b, 5). Split these into four parts by creating news faces from all edges to the center node. The resulting tetrahedra can be split more easily. (See below for details)
+		\label{it:centernodes}
+		\item Split each split class separately. Keep track of which faces had two splits and also record alternative topologies for these. (See Section \ref{sec:classes} for details)
+		\label{it:splits}
+		\item Fix compatibility between tetrahedra connected to twice split faces (See Section \ref{sec:facecombatibility} for details)
+		\label{it:facecompatibility}
+	\end{enumerate}
+
+	\noindent\textbf{Outputs}: \\
+	\indent\textbf{p}: New list of node positions, \\
+	\indent\textbf{t}: New list of tetrahedrons, \\
+	\indent\textbf{new\_to\_old}: Mapping from new tetrahedra to old tetrahedra indices.
+	\vspace{1cm}
+
+	\noindent\textbf{Step \ref{it:classification}}: Tetrahedron classification can be done uniquely by counting how many split edges are connected to each vertex of a tetrahedron. The four counts then uniquely map to the split class. Note that these counts are not sufficient to uniquely determine which node corresponds to each node in the split tetrahedron in the 3-chain (3c) case.
+
+
+	\noindent\textbf{Step \ref{it:centernodes}}: Compatibility between tetrahedra sharing a twice-split face is a little trickier problem. In the step \ref{it:centernodes}, we filtered out edge split patterns that result in tetrahedron splits such that faces may be impossible to fix without also modifying tetrahedrons that are not connected to the twice-split face. In fact, it is possible to construct an arbitrarily long chain of necessary corrections unless these cases are filtered in advance.
+
+	The remaining tetrahedra with twice split faces always have exactly two configurations for the sub-tetrahedra connected to the twice split face(s). Furthermore, the configurations are such that swapping between them never affects the topology of any other tetrahedra.
+
+	The split of 3a, 4b and 5 split classes is always done so that a newly created center node is connected to the original four nodes, and the tetrahedron is then split to four tetrahedra corresponding to the faces and the center node. The split patterns from the edge splits in the resulting four tetrahedron can then be processed along with the rest of the mesh.
+
+	\subsection{Fixing face compatibility}
+	\label{sec:facecombatibility}
+	The compatibility correction can be handled neatly with the following datastructures:
+
+	\texttt{\textbf{Bisplit~faces}}: A collection of  5-tuples $(f_0, f_1, f_2, f_3, f_4)$ corresponding to the nodes of twice split faces. $f_0$, $f_1$ and $f_2$ are the nodes in the original mesh in increasing node index order, while $f_3$ and $f_4$ are the edge centers. The order of $f_3$ and $f_4$ is defined so that $f_3$ is the node with three connecting edges (in the face), and $f_4$ is the node with four connecting edges. Note that this way $(f_0, f_1, f_2)$ triplet is a unique indicator for faces in the mesh, while $f_3$ and $f_4$ indicates which splitting topology resulted from the tetrahedron splitting. Note that for the interior of the mesh, the two tetrahedra corresponding to each side of the face are separately split. Therefore for the interior, there are always two \texttt{bisplit~face} entries, while for the faces on the boundary of the mesh, there is only one.\footnote{In our implementation, we actually save \texttt{bisplit~face} twice for each tetrahedra. This way the indexing can directly match the indexing of \texttt{Secondary~tetrahedra}.}
+
+	\texttt{\textbf{Primary~tetrahedra}}: The pair of tetrahedra corresponding to the topology defined by the \texttt{bisplit~faces}.
+
+	\texttt{\textbf{Secondary~tetrahedra}}: The pair of tetrahedra which swaps the face topology on the corresponding \texttt{bisplit~face}.
+
+	\begin{figure}[h]
+		\begin{subfigure}{0.5\textwidth}
+			\centering
+			\input{geogebras/cleaned/face_topo_1.tikz}
+		\end{subfigure}
+		\begin{subfigure}{0.5\textwidth}
+			\centering
+			\input{geogebras/cleaned/face_topo_2.tikz}
+		\end{subfigure}
+		\caption{Two topologies for the face $(0, 1, 2)$. In the left figure the \texttt{bisplit~face} 5-tuple is $(0, 1, 2, 3, 4)$, while in the right it is $(0, 1, 2, 4, 3)$. On the left tetrahedron, the corresponding \texttt{primary~tetrahedra} are $(1, 3, 4, 5)$ and $(1, 2, 4, 5)$, while the \texttt{secondary~tetrahedra} are $(2, 3, 4, 5)$ and $(1, 2, 3, 5)$. Note that for both configurations the third tetrahedra remains the same: $(0, 3, 4, 5)$.}
+	\end{figure}
+
+	Collecting the \texttt{bisplit~face} 5-tuples in an array, the \texttt{bisplit~face} can then be sorted by the keys defined by $f_0$, $f_1$ and $f_2$. Pairwise consecutive \texttt{bisplit~face} then classify faces into three groups:
+	\begin{enumerate}[label=\textbf{\arabic*.}, ref=\arabic*, itemsep=0em, parsep=0em]
+		\item If two subsequent 5-tuples match entirely (i.e. all of $f_0$, $f_1$, $f_2$, $f_3$ and $f_4$ are the same), the topology is already matching.
+		\item If $f_3$ and $f_4$ are swapped in the second 5-tuple, the topology is mismatched and the corresponding tetrahedras on one side of the face should be swapped for the \texttt{secondary~tetrahedra}.
+		\item If neither of the neighbouring 5-tuples have the same $f_0$, $f_1$ and $f_2$ entries, the face is on the boundary of the mesh, and therefore does not need swapping.
+	\end{enumerate}
+	\vspace{1cm}
+
+	Note that the construction of these \texttt{bisplit~face} is independent tetrahedronwise. Therefore \texttt{bisplit~face} classification and pairing can be computed in parallel as it is just a sort and a series of pairwise comparisons. Finally, the swapping operation can also be carried out in parallel as the swap between \texttt{primary} and \texttt{secondary~tetrahedra} can never affect the topology of neighboring tetrahedra with our choices of splitting patterns.
+
+	\pagebreak
+	\section{Split classes}
+	\label{sec:classes}
+	In the following, we list all the topological cases for different splitting patterns that can occur in a tetrahedron.
+
+	For each pattern, we list the new tetrahedra set.
+
+	The names given to the patterns correspond to function names in our code, while the alphanumeric code corresponds to identifiers used in \cite{embarrassinglyparallel} and \cite{edgebased}.
+
+	We have marked the bisplit~faces' quadrilateral forming edges with red lines. Furthermore, where necessary, we mark the \texttt{bisplit~faces} identifiers above the two tetrahedra that form the \texttt{primary~tetrahedra} configuration. The alternative configuration is then included in the \texttt{secondary~tetrahedra} table.
+
+	For split classes for which center node is added, we mark down the split classes for the resulting four tetrahedra. We always denote the center node with  $C$.
+
+	Finally, for each class, we include the four-digit edge splits per vertex identifier as ID:xxxx.
+
+	\vspace{1cm}
+
+	%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% no_split
+	\begin{minipage}{0.5\textwidth}
+		\textbf{No splits (0)}:
+
+		\begin{center}
+			\input{geogebras/cleaned/no_split.tikz}
+		\end{center}
+	\end{minipage}
+	\begin{minipage}{0.5\textwidth}
+		Ignored
+		\\
+
+		ID:0000
+	\end{minipage}
+
+	%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% one_split
+	\rule{\textwidth}{0.5pt}
+	\\
+
+	\begin{minipage}{0.5\textwidth}
+		\textbf{One split (1)}:
+
+		\begin{center}
+			\input{geogebras/cleaned/one_split.tikz}
+		\end{center}
+	\end{minipage}
+	\begin{minipage}{0.5\textwidth}
+		New tetrahedra
+
+		\begin{tabular}{cc}
+			\hline
+			0 & 1 \\
+			2 & 2 \\
+			3 & 3 \\
+			4 & 4
+		\end{tabular}
+		\\
+
+		ID:0011
+	\end{minipage}
+
+	%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% two_split_pair
+	\rule{\textwidth}{0.5pt}
+	\\
+
+	\begin{minipage}{0.5\textwidth}
+		\textbf{Two splits "pair" (2a)}:
+
+		\begin{center}
+			\input{geogebras/cleaned/two_split_pair.tikz}
+		\end{center}
+	\end{minipage}
+	\begin{minipage}{0.5\textwidth}
+		New tetrahedra
+
+		\begin{tabular}{ccc}
+			\hline
+			& \multicolumn{2}{c}{F01254} \\
+			0 & 1 & 2 \\
+			3 & 2 & 3 \\
+			4 & 3 & 4 \\
+			5 & 4 & 5
+		\end{tabular}
+		\\
+
+		Secondary~tetrahedra
+
+		\begin{tabular}{cc}
+			\hline
+			\multicolumn{2}{c}{F01254'} \\
+			1 & 1 \\
+			2 & 3 \\
+			3 & 4 \\
+			5 & 5
+		\end{tabular}
+		\\
+
+		ID:0112
+	\end{minipage}
+
+	%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% two_split_opposite
+	\rule{\textwidth}{0.5pt}
+	\\
+
+	\begin{minipage}{0.5\textwidth}
+		\textbf{Two splits "opposite" (2b)}:
+
+		\begin{center}
+			\input{geogebras/cleaned/two_split_opposite.tikz}
+		\end{center}
+	\end{minipage}
+	\begin{minipage}{0.5\textwidth}
+		New tetrahedra
+
+		\begin{tabular}{cccc}
+			\hline
+			0 & 0 & 1 & 1 \\
+			2 & 3 & 2 & 3 \\
+			4 & 4 & 4 & 4 \\
+			5 & 5 & 5 & 5
+		\end{tabular}
+		\\
+
+		ID:1111
+	\end{minipage}
+
+	%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% three_split_triple
+	\rule{\textwidth}{0.5pt}
+	\\
+
+	\begin{minipage}{0.5\textwidth}
+		\textbf{Three splits "triple" (3a)}:
+
+		\begin{center}
+			\input{geogebras/cleaned/three_split_triple.tikz}
+		\end{center}
+	\end{minipage}
+	\begin{minipage}{0.5\textwidth}
+		Center node $C$ is added in this class.
+		\\
+
+		Resulting split classes
+
+		\begin{tabular}{cccc}
+			\hline
+			2a & 2a & 2a & 0 \\
+			\hline
+			$C$ & $C$ & $C$ & $C$ \\
+			0 & 0 & 0 & 1 \\
+			1 & 1 & 2 & 2 \\
+			2 & 3 & 3 & 3
+		\end{tabular}
+		\\
+
+		ID:1113
+	\end{minipage}
+
+	%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% three_split_loop
+	\rule{\textwidth}{0.5pt}
+	\\
+
+	\begin{minipage}{0.5\textwidth}
+		\textbf{Three splits "loop" (3b)}:
+
+		\begin{center}
+			\input{geogebras/cleaned/three_split_loop.tikz}
+		\end{center}
+	\end{minipage}
+	\begin{minipage}{0.5\textwidth}
+		New tetrahedra
+
+		\begin{tabular}{cccc}
+			\hline
+			0 & 1 & 3 & 2 \\
+			3 & 3 & 4 & 5 \\
+			4 & 4 & 5 & 6 \\
+			5 & 6 & 6 & 3
+		\end{tabular}
+		\\
+
+		ID:0222
+	\end{minipage}
+
+	%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% three_split_chain
+	\rule{\textwidth}{0.5pt}
+	\\
+
+	\begin{minipage}{0.5\textwidth}
+		\textbf{Three splits "chain" (3c)}:
+
+		\begin{center}
+			\input{geogebras/cleaned/three_split_chain.tikz}
+		\end{center}
+	\end{minipage}
+	\begin{minipage}{0.5\textwidth}
+		New tetrahedra
+
+		\begin{tabular}{ccccc}
+			\hline
+			\multicolumn{2}{c}{F01364} & \multicolumn{2}{c}{F01245} &\\
+			0 & 3 & 1 & 1 & 2 \\
+			3 & 4 & 2 & 4 & 3 \\
+			4 & 5 & 5 & 5 & 5 \\
+			5 & 6 & 6 & 6 & 6
+		\end{tabular}
+		\\
+
+		Secondary~tetrahedra
+
+		\begin{tabular}{cccc}
+			\hline
+			\multicolumn{2}{c}{F01364'} & \multicolumn{2}{c}{F01245'} \\
+			0 & 0 & 1 & 2 \\
+			4 & 3 & 2 & 4 \\
+			5 & 5 & 4 & 5 \\
+			6 & 6 & 6 & 6
+		\end{tabular}
+		\\
+
+		ID:1122
+	\end{minipage}
+
+	%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% four_split_dangler
+	\rule{\textwidth}{0.5pt}
+	\\
+
+	\begin{minipage}{0.5\textwidth}
+		\textbf{Four splits "dangler" (4a)}:
+
+		\begin{center}
+			\input{geogebras/cleaned/four_split_dangler.tikz}
+		\end{center}
+	\end{minipage}
+	\begin{minipage}{0.5\textwidth}
+		New tetrahedra
+
+		\begin{tabular}{cccccc}
+			\hline
+			& & \multicolumn{2}{c}{F01346} & \multicolumn{2}{c}{F02356}\\
+			0 & 4 & 4 & 1 & 2 & 5 \\
+			4 & 5 & 1 & 3 & 3 & 2 \\
+			5 & 6 & 6 & 6 & 6 & 6 \\
+			6 & 7 & 7 & 7 & 7 & 7
+		\end{tabular}
+		\\
+
+		Secondary~tetrahedra
+
+		\begin{tabular}{cccc}
+			\hline
+			\multicolumn{2}{c}{F01364'} & \multicolumn{2}{c}{F02356'} \\
+			3 & 1 & 2 & 3 \\
+			4 & 3 & 3 & 5 \\
+			6 & 4 & 5 & 6 \\
+			7 & 7 & 7 & 7
+		\end{tabular}
+		\\
+
+		ID:1223
+	\end{minipage}
+
+	%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% four_split_run
+	\rule{\textwidth}{0.5pt}
+	\\
+
+	\begin{minipage}{0.5\textwidth}
+		\textbf{Four splits "run" (4b)}:
+
+		\begin{center}
+			\input{geogebras/cleaned/four_split_run.tikz}
+		\end{center}
+	\end{minipage}
+	\begin{minipage}{0.5\textwidth}
+		Center node $C$ is added in this class.
+		\\
+
+		Resulting split classes
+
+		\begin{tabular}{cccc}
+			\hline
+			2a & 2a & 2a & 2a \\
+			\hline
+			$C$ & $C$ & $C$ & $C$ \\
+			0 & 0 & 0 & 1 \\
+			1 & 1 & 2 & 2 \\
+			2 & 3 & 3 & 3
+		\end{tabular}
+		\\
+
+		ID:2222
+	\end{minipage}
+
+	%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% five_split
+	\rule{\textwidth}{0.5pt}
+	\\
+
+	\begin{minipage}{0.5\textwidth}
+		\textbf{Five splits (5)}:
+
+		\begin{center}
+			\input{geogebras/cleaned/five_split.tikz}
+		\end{center}
+	\end{minipage}
+	\begin{minipage}{0.5\textwidth}
+		Center node $C$ is added in this class.
+		\\
+
+		Resulting split classes
+
+		\begin{tabular}{cccc}
+			\hline
+			3b & 3b & 2a & 2a \\
+			\hline
+			$C$ & $C$ & $C$ & $C$ \\
+			0 & 0 & 0 & 1 \\
+			1 & 1 & 2 & 2 \\
+			2 & 3 & 3 & 3
+		\end{tabular}
+		\\
+
+		ID:2233
+	\end{minipage}
+
+	%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% six_split
+	\rule{\textwidth}{0.5pt}
+	\\
+
+	\begin{minipage}{0.5\textwidth}
+		\textbf{Six splits (6)}:
+
+		\begin{center}
+			\input{geogebras/cleaned/six_split.tikz}
+		\end{center}
+	\end{minipage}
+	\begin{minipage}{0.5\textwidth}
+		New tetrahedra
+
+		\begin{tabular}{cccccccc}
+			\hline
+			0 & 6 & 5 & 4 & 4 & 4 & 4 & 4 \\
+			4 & 8 & 7 & 1 & 9 & 9 & 9 & 9 \\
+			5 & 9 & 9 & 7 & 6 & 6 & 5 & 7 \\
+			6 & 3 & 2 & 8 & 8 & 5 & 7 & 8
+		\end{tabular}
+		\\
+
+		ID:3333
+	\end{minipage}
+
+	\pagebreak
+	\begin{thebibliography}{Bibliography}
+		\bibitem{embarrassinglyparallel}
+		\textsc{D. C. Thompson and P. P. Pébay}, \textit{Embarrassingly parallel mesh refinement by edge subdivision, Engineering with Computers 2006, vol. 2}, \url{https://link.springer.com/content/pdf/10.1007/s00366-006-0020-3.pdf}
+		\bibitem{edgebased}
+		\textsc{D. Ruprecht and H. Müller}, \textit{A Scheme for Edge-based Adaptive Tetrahedron Subdivision}, \url{http://citeseerx.ist.psu.edu/viewdoc/download?doi=10.1.1.42.9474&rep=rep1&type=pdf}
+	\end{thebibliography}
+
+
+	\end{document}
